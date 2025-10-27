@@ -2,9 +2,9 @@ name: Build and release Aseprite
 
 on:
   push:
-    branches: 
-      - main 
-    paths: 
+    branches:
+      - main
+    paths:
       - 'BuildLog.md'
   workflow_dispatch:
 env:
@@ -15,30 +15,21 @@ jobs:
     name: Fetch deps info
     runs-on: ubuntu-latest
     outputs:
-      download-link: ${{ steps.get-release.outputs.download-link }}
-      release-tag: ${{ steps.get-release.outputs.release-tag }}
+      download-link: ${{ steps.aseprite-link.outputs.download-link }}
+      release-tag: ${{ steps.aseprite-link.outputs.release-tag }}
     steps:
-      - name: Get latest Aseprite release (including pre-releases)
-        id: get-release
+      - name: Fetch Aseprite pre-release link
+        id: aseprite-link
         run: |
-          # 获取最新的发布版本（包括预发布版本）
-          response=$(curl -s "https://api.github.com/repos/aseprite/aseprite/releases")
-          latest_release=$(echo "$response" | jq -r '.[0]')
+          # 使用 GitHub CLI 获取最新的预发布版本
+          release_info=$(gh api repos/aseprite/aseprite/releases --jq '[.[] | select(.prerelease) | {tag_name, assets}] | first')
+          download_url=$(echo $release_info | jq -r '.assets[] | select(.name | test("Aseprite-.*?-Source\\.zip")) | .browser_download_url')
+          tag_name=$(echo $release_info | jq -r '.tag_name')
           
-          release_tag=$(echo "$latest_release" | jq -r '.tag_name')
-          echo "找到最新版本: $release_tag"
-          
-          # 查找源代码zip包的下载链接
-          download_link=$(echo "$latest_release" | jq -r '.assets[] | select(.name | test("Aseprite-.*?-Source\\.zip")) | .browser_download_url')
-          
-          if [ -z "$download_link" ]; then
-            echo "未找到源代码包，使用默认克隆方式"
-            # 如果没有找到源代码包，就使用git克隆方式
-            download_link="https://github.com/aseprite/aseprite/archive/refs/tags/$release_tag.zip"
-          fi
-          
-          echo "release-tag=$release_tag" >> $GITHUB_OUTPUT
-          echo "download-link=$download_link" >> $GITHUB_OUTPUT
+          echo "download-link=$download_url" >> $GITHUB_OUTPUT
+          echo "release-tag=$tag_name" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   create-release:
     name: Create Release
@@ -65,9 +56,9 @@ jobs:
       contents: write
     runs-on: ${{ matrix.os }}
     strategy:
-      matrix:
-        os: [ windows-latest, ubuntu-latest, macOS-latest ]
-      fail-fast: false
+        matrix:
+          os: [ windows-latest, ubuntu-latest, macOS-latest ]
+        fail-fast: false
     steps:
       - name: Install Dependencies
         if: runner.os == 'Linux'
@@ -78,18 +69,11 @@ jobs:
             libpixman-1-dev libfreetype6-dev libharfbuzz-dev zlib1g-dev \
             libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev \
             libfontconfig1-dev
-      
       - uses: actions/checkout@v4
-      
       - name: Install Aseprite
         shell: bash
         run: |
-          # 删除旧目录（如果存在）
-          rm -rf aseprite
-          # 克隆最新版本的代码
           git clone --recurse-submodules -j8 https://github.com/aseprite/aseprite --branch ${{ needs.create-release.outputs.release-tag }}
-          echo "已克隆 Aseprite 版本: ${{ needs.create-release.outputs.release-tag }}"
-      
       - name: Install Skia
         working-directory: aseprite
         shell: bash
@@ -105,12 +89,9 @@ jobs:
             wget https://github.com/aseprite/skia/releases/download/m124-08a5439a6b/Skia-Linux-Release-x64.zip
             unzip Skia-Linux-Release-x64.zip -d skia
           fi
-      
       - uses: aseprite/get-ninja@main
-      
       - uses: ilammy/msvc-dev-cmd@v1
         if: runner.os == 'Windows'
-      
       - name: Generating Makefiles
         shell: bash
         working-directory: aseprite
@@ -118,3 +99,42 @@ jobs:
           export enable_ccache=off
           export laf_backend=skia
           export enable_scripting=on
+
+          if [[ "${{ runner.os }}" == "macOS" ]] ; then
+            export skia_arch=arm64
+          else
+            export skia_arch=x64
+          fi
+
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=${{ matrix.build_type }} \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=10.9 \
+            -DENABLE_TESTS=OFF \
+            -DENABLE_SCRIPTING=$enable_scripting \
+            -DENABLE_CCACHE=$enable_ccache \
+            -DLAF_BACKEND=$laf_backend \
+            -DSKIA_DIR=$(realpath skia) \
+            -DOPENSSL_USE_STATIC_LIBS=ON \
+            -DSKIA_LIBRARY_DIR=$(realpath skia/out/Release-$skia_arch)
+      - name: Compiling
+        shell: bash
+        working-directory: aseprite
+        run: |
+          cd build && ninja
+      - name: Clean Up Build folder
+        working-directory: aseprite/build/bin
+        shell: bash
+        run: find . -mindepth 1 ! \( -name 'aseprite' -o -name 'aseprite.exe' -o -name 'data' -prune \) -exec rm -rf {} +
+      - name: Make portable zip
+        working-directory: aseprite/build/bin
+        run: echo '# This file is here so Aseprite behaves as a portable program' > aseprite.ini
+      - name: Create release
+        working-directory: aseprite/build/bin
+        run: 7z -tzip a Aseprite-${{ needs.create-release.outputs.release-tag }}-${{ runner.os }}.zip *
+      - name: Upload release
+        uses: svenstaro/upload-release-action@v2
+        with:
+          repo_token: ${{ secrets.GITHUB_TOKEN }}
+          file: aseprite/build/bin/Aseprite-${{ needs.create-release.outputs.release-tag }}-${{ runner.os }}.zip
+          asset_name: Aseprite-${{ needs.create-release.outputs.release-tag }}-${{ runner.os }}.zip
+          tag: ${{ needs.create-release.outputs.release-tag }}

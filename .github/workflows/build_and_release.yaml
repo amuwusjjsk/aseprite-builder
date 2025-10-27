@@ -25,6 +25,7 @@ jobs:
             group: aseprite
             repo: aseprite
             match: Aseprite-.*?-Source.zip
+            include-prereleases: true
 
   create-release:
     name: Create Release

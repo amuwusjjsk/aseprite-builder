@@ -18,18 +18,13 @@ jobs:
       download-link: ${{ steps.aseprite-link.outputs.download-link }}
       release-tag: ${{ steps.aseprite-link.outputs.release-tag }}
     steps:
-      - name: Fetch Aseprite pre-release link
+      - name: Fetch Aseprite release link
         id: aseprite-link
-        run: |
-          # 使用 GitHub CLI 获取最新的预发布版本
-          release_info=$(gh api repos/aseprite/aseprite/releases --jq '[.[] | select(.prerelease) | {tag_name, assets}] | first')
-          download_url=$(echo $release_info | jq -r '.assets[] | select(.name | test("Aseprite-.*?-Source\\.zip")) | .browser_download_url')
-          tag_name=$(echo $release_info | jq -r '.tag_name')
-          
-          echo "download-link=$download_url" >> $GITHUB_OUTPUT
-          echo "release-tag=$tag_name" >> $GITHUB_OUTPUT
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        uses: a1393323447/fetch-release@main
+        with:
+            group: aseprite
+            repo: aseprite
+            match: Aseprite-.*?-Source.zip
 
   create-release:
     name: Create Release
